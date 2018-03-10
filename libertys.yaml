@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation  Template for liberty profile
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  DBName:
+    Default: MySQLDB
+    Description: The database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+  DBUser:
+    NoEcho: 'true'
+    Description: The database admin account username
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+  DBPassword:
+    NoEcho: 'true'
+    Description: The database admin account password
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+  DBClass:
+    Default: db.t2.small
+    Description: Select the DB Classs
+    Type: String
+    AllowedValues:
+    - db.t2.small
+    - db.t2.micro
+    - db.t2.medium
+  Storage:
+    Description: Enter the Capacity of DBInstanceClass
+    Type: String
+    AllowedPattern: '[0-9]*'
+  EngineVersion:
+    Default: 5.6.37
+    Description: Select the MySQL Engine Version
+    Type: String
+    AllowedValues:
+      - 5.7.19
+      - 5.7.17
+      - 5.7.16
+      - 5.6.37
+      - 5.6.35
+      - 5.6.34
+      - 5.6.29
+      - 5.6.27
+      - 5.5.57
+      - 5.5.54
+      - 5.5.53
+      - 5.5.46
+
+Resources:
+  RDSMysqlinstance:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/ibm-liberty/scripts/RDS.template
+      TimeoutInMinutes: '10'
+      Parameters:
+        DBName:
+          Ref:  DBName
+        DBUser:
+          Ref: DBUser
+        DBPassword:
+          Ref: DBPassword
+        DBClass:
+          Ref: DBClass
+        EngineVersion:
+          Ref: EngineVersion
+        Storage:
+          Ref: Storage
+  LibertySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 9080 and SSH access via port 22
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '9080'
+        ToPort: '9080'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: !Ref SSHLocation
+
+  LibertyProfile:
+    Type: AWS::EC2::Instance
+    Metadata:
+      Comment: Install  liberty profile
+      AWS::CloudFormation::Init:
+        configSets:
+         quickstart:
+         - install
+         - mysqlrestore
+         - configure
+         - deploySampleApp
+         - startServer
+        install:
+          packages:
+            yum:
+              mysql: []
+          sources:
+            "/home/ec2-user/aws-cli": "https://github.com/aws/aws-cli/tarball/master"
+          sources:
+            "/opt/websphere": http://repo1.maven.org/maven2/com/ibm/websphere/appserver/runtime/wlp-webProfile7/17.0.0.2/wlp-webProfile7-17.0.0.2.zip
+          files:
+            "/etc/profile.d/wlp.sh":
+             source:
+              Fn::Sub: https://s3.amazonaws.com/ibm-liberty/scripts/wlp.sh
+             mode: '000755'
+             owner: root
+             group: root
+            "/etc/init.d/wlp":
+             source:
+              Fn::Sub: https://s3.amazonaws.com/ibm-liberty/scripts/wlp
+             mode: '000700'
+             owner: root
+             group: root
+            "/tmp/01_create_liberty_server.sh":
+             source:
+               Fn::Sub: https://s3.amazonaws.com/ibm-liberty/scripts/createServer.sh
+             mode: '000775'
+             owner: root
+             group: root
+          commands:
+            01_create_Server:
+              command: "/tmp/01_create_liberty_server.sh"
+        mysqlrestore:
+          sources:
+            "/tmp/wsdb.sql": https://s3.amazonaws.com/mysqldump-ta/mysqldb/wsdb.sql.zip
+          files:
+            "/tmp/setup.sh":
+              content:
+                Fn::Join:
+                - ''
+                - - 'mysql -h '
+                  - !GetAtt RDSMysqlinstance.Outputs.RDSHostname
+                  - '  -u mysqladmin -pmysqladmin < /tmp/wsdb.sql/wsdb.sql '
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            001_mysqldump:
+              command: "/tmp/setup.sh"
+        configure:
+          files:
+            "/tmp/02_configureServer.sh":
+             source:
+              Fn::Sub: https://s3.amazonaws.com/ibm-liberty/scripts/configureServer.sh
+             mode: '000755'
+             owner: root
+             group: root
+          commands:
+            02_configure_Server:
+              command: "/tmp/02_configureServer.sh"
+        deploySampleApp:
+          files:
+            "/tmp/ferret-1.0.war":
+              source: http://repo1.maven.org/maven2/net/wasdev/wlp/sample/ferret/1.0/ferret-1.0.war
+              mode: '000544'
+              owner: root
+              group: root
+            "/tmp/03_deploySampleApp.sh":
+              source:
+                Fn::Sub: https://s3.amazonaws.com/ibm-liberty/scripts/deploySampleApp.sh
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            03_deploy_sample_app:
+              command: "/tmp/03_deploySampleApp.sh"
+        startServer:
+          files:
+            "/tmp/04_startServer.sh":
+              source:
+                Fn::Sub: https://s3.amazonaws.com/ibm-liberty/scripts/startServer.sh
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            04_start_Server:
+              command: "/tmp/04_startServer.sh"
+
+        cleanup: {}
+
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+    Properties:
+      ImageId: ami-a4c7edb2
+      KeyName:
+        Ref: KeyName
+      InstanceType: t2.micro
+      SecurityGroups:
+      - Ref: LibertySecurityGroup
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash -xe
+            # Get the latest CloudFormation package
+            yum update -y aws-cfn-bootstrap
+            # Start cfn-init
+            /opt/aws/bin/cfn-init -s ${AWS::StackId} -r LibertyProfile --region ${AWS::Region} --configsets quickstart || error_exit 'Failed to run cfn-init'
+            # Start up the cfn-hup daemon to listen for changes to the EC2 instance metadata
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource LibertyProfile --region ${AWS::Region}
+    DependsOn: RDSMysqlinstance
+Outputs:
+  InstanceId:
+    Description: The instance ID of the wls server
+    Value:
+      Ref: LibertyProfile
+  WebsiteURL:
+    Value:
+      !Sub 'http://${LibertyProfile.PublicDnsName}:9080/ferret'
+    Description: URL for newly created  liberty profile
+  PublicIP:
+    Description: Public IP address of the wls server
+    Value:
+      !GetAtt LibertyProfile.PublicIp
+  PublicIpf:
+    Description: public dns address name
+    Value:
+      !GetAtt LibertyProfile.PublicDnsName
+  Endpoint:
+    Description: mysql daabase endpoint URL
+    Value:
+      Fn::GetAtt:
+      - RDSMysqlinstance
+      - Outputs.JDBCConnectionString
+  Host:
+     Description: Data base Hostname
+     Value:
+       Fn::GetAtt:
+       - RDSMysqlinstance
+       - Outputs.RDSHostname
